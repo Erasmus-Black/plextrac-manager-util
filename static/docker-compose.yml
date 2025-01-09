@@ -10,6 +10,8 @@ services:
     - postgres
     environment:
       STARTUP_MODE: API_ONLY
+      CLOUD_STORAGE_ENDPOINT: ${CLOUD_STORAGE_ENDPOINT:-minio}
+      CLOUD_STORAGE_SSL: ${CLOUD_STORAGE_SSL:-false}
     env_file:
     - .env
     image: "plextrac/plextracapi:${UPGRADE_STRATEGY:-stable}"
@@ -42,6 +44,7 @@ services:
     command: |
       sh -c
         "npm run maintenance:enable &&
+         npm run pg:superuser:bootstrap --if-present &&
          npm run pg:migrate &&
          npm run db:migrate &&
          npm run pg:etl up all &&
@@ -122,6 +125,10 @@ services:
       USE_CUSTOM_CERT: "${USE_CUSTOM_CERT-}"
       CKEDITOR_MIGRATE: "${CKEDITOR_MIGRATE:-}"
       WAF_ENABLED: "${WAF_ENABLED:-true}"
+      UPSTREAM_CLOUD_BUCKET: ${UPSTREAM_CLOUD_BUCKET:-cloud}
+      UPSTREAM_CLOUD_PREFIX: ${UPSTREAM_CLOUD_PREFIX:-uploads}
+      MINIO_ENABLED : ${MINIO_ENABLED:-true}
+      UPSTREAM_CLOUD_HOST: ${UPSTREAM_CLOUD_HOST:-minio}
     ports:
     - 0.0.0.0:80:80/tcp
     - 0.0.0.0:443:443/tcp
@@ -158,6 +165,9 @@ services:
       REDIS_CONNECTION_STRING: "${REDIS_CONNECTION_STRING:-redis}"
       REDIS_PASSWORD: "${REDIS_PASSWORD:?err}"
       API_INTEGRATION_AUTH_CONFIG_NOTIFICATION_SERVICE: "${API_INTEGRATION_AUTH_CONFIG_NOTIFICATION_SERVICE:?err}"
+      INTERNAL_API_KEY_SHARED: "${INTERNAL_API_KEY_SHARED:?err}"
+      CORE_API_BASE_URL: "${CORE_API_BASE_URL:?err}"
+      CTEM_API_BASE_URL: "${CTEM_API_BASE_URL:?err}"
     healthcheck:
       test:
       - "CMD"
@@ -196,6 +206,9 @@ services:
       REDIS_PASSWORD: "${REDIS_PASSWORD:?err}"
       serviceConfig: ${serviceConfig:-}
       API_INTEGRATION_AUTH_CONFIG_NOTIFICATION_SERVICE: "${API_INTEGRATION_AUTH_CONFIG_NOTIFICATION_SERVICE:?err}"
+      INTERNAL_API_KEY_SHARED: "${INTERNAL_API_KEY_SHARED:?err}"
+      CORE_API_BASE_URL: "${CORE_API_BASE_URL:?err}"
+      CTEM_API_BASE_URL: "${CTEM_API_BASE_URL:?err}"
     healthcheck:
       test:
       - "CMD"
@@ -263,7 +276,7 @@ services:
       timeout: 30s
 
   postgres:
-    image: postgres:14-alpine
+    image: plextrac/plextracpostgres:stable
     environment:
       PGDATA: /var/lib/postgresql/data/pgdata
       PG_CORE_ADMIN_PASSWORD: ${PG_CORE_ADMIN_PASSWORD:?err}
@@ -334,12 +347,48 @@ services:
       - "--no-update-notifier"
     entrypoint: npm run
     command: "start:contextual-scoring-service"
+  
+  minio:
+    ports:
+      - 127.0.0.1:9000:9000
+      - 127.0.0.1:9001:9001
+    image: chainguard/minio@sha256:92b5ea1641d52262d6f65c95cffff4668663e00d6b2033875774ba1c2212cfa7
+    restart: always
+    volumes:
+      - minio-data:/data
+    entrypoint: minio
+    command: server /data --console-address ':9001' --address '0.0.0.0:9000'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?err}
+      MINIO_LOCAL_USER: ${MINIO_LOCAL_USER:-localadmin}
+      MINIO_LOCAL_PASSWORD: ${MINIO_LOCAL_PASSWORD:?err}
+      CLOUD_STORAGE_ENDPOINT: ${CLOUD_STORAGE_ENDPOINT:-127.0.0.1}
+      CLOUD_STORAGE_PORT: ${CLOUD_STORAGE_PORT:-9000}
+      CLOUD_STORAGE_SSL: ${CLOUD_STORAGE_SSL:-false}
+      CLOUD_STORAGE_ACCESS_KEY: ${CLOUD_STORAGE_ACCESS_KEY:?err}
+      CLOUD_STORAGE_SECRET_KEY: ${CLOUD_STORAGE_SECRET_KEY:?err}
+  minio-bootstrap:
+    image: plextrac/plextrac-minio-bootstrap:stable
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?err}
+      MINIO_LOCAL_USER: ${MINIO_LOCAL_USER:-localadmin}
+      MINIO_LOCAL_PASSWORD: ${MINIO_LOCAL_PASSWORD:?err}
+      CLOUD_STORAGE_ACCESS_KEY: ${CLOUD_STORAGE_ACCESS_KEY:?err}
+      CLOUD_STORAGE_SECRET_KEY: ${CLOUD_STORAGE_SECRET_KEY:?err}
+      MINIO_ENABLED : ${MINIO_ENABLED:-true}
+      UPSTREAM_CLOUD_BUCKET: ${UPSTREAM_CLOUD_BUCKET:-cloud}
+      
 
 volumes:
   dbdata: {}
   uploads: {}
   letsencrypt: {}
   localesOverride: {}
+  minio-data: {}
   postgres-data: {}
   postgres-initdb:
     driver: local

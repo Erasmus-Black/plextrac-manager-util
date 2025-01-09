@@ -148,16 +148,24 @@ function mod_check_etl_status() {
   local migration_exited="running"
   title "Checking Data Migration Status"
   info "Checking Migration Status"
+  secs=300
+  endTime=$(( $(date +%s) + secs ))
+  if [[ $(container_client ps -a | grep migrations 2>/dev/null | awk '{print $1}') != "" ]]; then
+    migration_exited="running"
+  else
+    migration_exited="exited"
+    debug "Migration container not found"
+  fi
   while [ "$migration_exited" == "running" ]; do
     # Check if the migration container has exited, e.g., migrations have completed or failed
-    if [ "$CONTAINER_RUNTIME" == "podman" ]; then
-      local migration_exited=$(podman container inspect --format '{{.State.Status}}' "migrations")
-    else
-      local migration_exited=$(docker inspect --format '{{.State.Status}}' "plextrac-couchbase-migrations-1")
+    local migration_exited=$(container_client inspect --format '{{.State.Status}}' `container_client ps -a | grep migrations 2>/dev/null | awk '{print $1}'` || migration_exited="exited")
+    if [ $(date +%s) -gt $endTime ]; then
+      error "Migration container has been running for over 5 minutes or is still running. Please ensure they complete or fail before taking further action with the PlexTrac Manager Utility. You can check on the logs by running 'docker compose logs -f couchbase-migrations'"
+      die "Exiting PlexTrac Manager Utility."
     fi
-    for s in / - \\ \|; do printf "\r$s $(docker inspect --format '{{.State.Status}}' plextrac-couchbase-migrations-1) -- $(docker logs plextrac-couchbase-migrations-1 2> /dev/null | tail -n 1 -q)"; sleep .1; done
+    for s in / - \\ \|; do printf "\r\033[K$s $(container_client inspect --format '{{.State.Status}}' `container_client ps -a | grep migrations 2>/dev/null | awk '{print $1}'`) -- $(container_client logs `container_client ps -a | grep migrations 2>/dev/null | awk '{print $1}'` 2> /dev/null | tail -n 1 -q)"; sleep .1; done
   done
-  printf "\r"
+  printf "\r\033[K"
   info "Migrations complete"
 
   if [ "${IGNORE_ETL_STATUS:-false}" == "false" ]; then

@@ -25,10 +25,15 @@ function generate_default_config() {
   source <(echo "${existingCfg}")
   set +o allexport
 
+  # NOTE: we need to leave API_INTEGRATION_AUTH_CONFIG_NOTIFICATION_SERVICE until all cloud-hosted environments are no
+  # longer running code that relies on this variable. It has been replaced by INTERNAL_API_KEY_SHARED for newer versions.
 
   # Generate base env, using imported vars from above where applicable
   generatedEnv="
 API_INTEGRATION_AUTH_CONFIG_NOTIFICATION_SERVICE=${API_INTEGRATION_AUTH_CONFIG_NOTIFICATION_SERVICE:-`generateSecret`}
+INTERNAL_API_KEY_SHARED=${INTERNAL_API_KEY_SHARED:-`generateSecret`}
+CORE_API_BASE_URL=http://plextracapi:4350
+CTEM_API_BASE_URL=http://ctem-api:3332
 JWT_KEY=${JWT_KEY:-`generateSecret`}
 MFA_KEY=${MFA_KEY:-`generateSecret`}
 COOKIE_KEY=${COOKIE_KEY:-`generateSecret`}
@@ -40,8 +45,6 @@ DOCKER_HUB_KEY=${DOCKER_HUB_KEY:-}
 ADMIN_EMAIL=${ADMIN_EMAIL:-}
 LETS_ENCRYPT_EMAIL=${LETS_ENCRYPT_EMAIL:-}
 USE_CUSTOM_CERT=${USE_CUSTOM_CERT:-false}
-USE_CUSTOM_MAILER_CERT=${USE_CUSTOM_MAILER_CERT:-false}
-USE_MAILER_SSL=${USE_MAILER_SSL:-false}
 COUCHBASE_URL=${couchbaseComposeService}
 REDIS_PASSWORD=${REDIS_PASSWORD:-`generateSecret`}
 REDIS_CONNECTION_STRING=redis
@@ -54,6 +57,10 @@ CKEDITOR_SERVER_CONFIG=${CKEDITOR_SERVER_CONFIG:-}
 CONTAINER_RUNTIME=${CONTAINER_RUNTIME:-"docker"}
 LOCK_UPDATES=${LOCK_UPDATES:-"false"}
 LOCK_VERSION=${LOCK_VERSION:-}
+MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-`generateSecret`}
+MINIO_LOCAL_PASSWORD=${MINIO_LOCAL_PASSWORD:-`generateSecret`}
+CLOUD_STORAGE_ACCESS_KEY=${CLOUD_STORAGE_ACCESS_KEY:-`generateSecret 20`}
+CLOUD_STORAGE_SECRET_KEY=${CLOUD_STORAGE_SECRET_KEY:-`generateSecret`}
 
 
 `generate_default_couchbase_env | setDefaultSecrets`
@@ -92,7 +99,7 @@ LOCK_VERSION=${LOCK_VERSION:-}
 
 function generateSecret() {
   # replace any non-alphanumeric characters so postgres doesn't choke
-  echo `head -c 64 /dev/urandom | base64 | tr -cd '[:alnum:]._-' | head -c 32`
+  echo `head -c 64 /dev/urandom | base64 | tr -cd '[:alnum:]._-' | head -c ${1:-32}`
 }
 
 function setDefaultSecrets() {
@@ -137,6 +144,25 @@ function login_dockerhub() {
       container_client login ${IMAGE_REGISTRY} $image_user --password-stdin 2>&1 <<< "${IMAGE_REGISTRY_PASS}" || die "Failed to login to ${IMAGE_REGISTRY}"
     fi
     log "${BLUE}$IMAGE_REGISTRY${RESET}: SUCCESS"
+  fi
+
+  if [ -n "${CKE_REGISTRY:-}" ]; then
+    debug "Custom CKE Image Registry Found... Attempting login"
+    if [ -z "${CKE_REGISTRY_USER:-}" ]; then
+      debug "${CKE_REGISTRY:-} username not found, continuing..."
+      local cke_user=""
+    else
+      local cke_user="-u ${CKE_REGISTRY_USER:-}"
+    fi
+
+    if [ -z "${CKE_REGISTRY_PASS:-}" ]; then
+      debug "${CKE_REGISTRY:-} password not found, continuing..."
+      local cke_pass=""
+      container_client login ${CKE_REGISTRY} $cke_user || die "Failed to login to ${CKE_REGISTRY}"
+    else
+      container_client login ${CKE_REGISTRY} $cke_user --password-stdin 2>&1 <<< "${CKE_REGISTRY_PASS}" || die "Failed to login to ${CKE_REGISTRY}"
+    fi
+    log "${ORANGE}$CKE_REGISTRY${RESET}: SUCCESS"
   fi
   log "Done."
 }
@@ -221,7 +247,7 @@ function getCKEditorRTCConfig() {
     debug "---"
     debug "Running CKEditor migration"
     if [ "$CONTAINER_RUNTIME" == "podman" ]; then
-      CKEDITOR_MIGRATE_OUTPUT=$(podman run --rm -it --name ckeditor-migration --network=plextrac --env-file ${PLEXTRAC_HOME}/.env "${serviceValues[api-image]}" npm run ckeditor:environment:migration --if-present | grep '^{' || debug "ERROR: Unable to run ckeditor:environment:migration")
+      CKEDITOR_MIGRATE_OUTPUT=$(podman run --rm -it --name ckeditor-migration --network=plextrac --replace --env-file ${PLEXTRAC_HOME}/.env "${serviceValues[api-image]}" npm run ckeditor:environment:migration --no-update-notifier --if-present || debug "ERROR: Unable to run ckeditor:environment:migration")
       podman rm -f ckeditor-migration &>/dev/null
     else
       # parses output and saves the result of the json meta data
@@ -232,12 +258,13 @@ function getCKEditorRTCConfig() {
 
     ## Split the output so we can send logs out, but keep the key separate
     CKEDITOR_JSON=$(echo "$CKEDITOR_MIGRATE_OUTPUT" | grep '^{' || debug "INFO: no JSON found in response")
-    CKEDITOR_LOGS_OUTPUT=$(echo "$CKEDITOR_MIGRATE_OUTPUT" | grep -v '^{' || debug "ERROR: Invalid response from ckeditor-migration")
+    CKEDITOR_LOGS_OUTPUT=$(echo "$CKEDITOR_MIGRATE_OUTPUT" | grep -v '^{' || debug "ERROR: Invalid response from ckeditor-migration; no logs recorded")
     # for each line in the variable $CKEDITOR_LOGS_OUTPUT send to logs with logger
     while read -r line; do
       logger -t ckeditor-migration $line
     done <<< "$CKEDITOR_LOGS_OUTPUT"
-    echo "$CKEDITOR_LOGS_OUTPUT" > ${PLEXTRAC_HOME}/ckeditor-migration.log
+  
+    echo "$CKEDITOR_LOGS_OUTPUT" > "${PLEXTRAC_HOME}/ckeditor-migration.log"
 
     # check the result to confirm it contains the expected element in the JSON, then base64 encode if it does
     if [ "$(echo "$CKEDITOR_JSON" | jq -e ".[] | any(\".api_secret\")")" ]; then
@@ -258,8 +285,18 @@ function getCKEditorRTCConfig() {
 
 # This will ensure that the two services for CKE are stood up and functional before we run the Environment or the RTC migrations
 function ckeditorNginxConf() {
+  info "Ensuring CKEditor Backend and NGINX Proxy are running"
   debug "Enabling proxy for CKEditor Backend and NGINX Proxy settings"
-  compose_client up -d ckeditor-backend
-  compose_client up -d plextracnginx --force-recreate
-  sleep 20
+  if [ "$CONTAINER_RUNTIME" == "podman" ]; then
+    podman rm -f plextracnginx &>/dev/null
+    podman rm -f ckeditor-backend &>/dev/null
+    mod_start # This will recreate NGINX and standup the ckeditor-backend services
+    debug "Waiting 40 seconds for services to start"
+    sleep 40
+  else
+    compose_client up -d ckeditor-backend
+    compose_client up -d plextracnginx --force-recreate
+    debug "Waiting 40 seconds for services to start"
+    sleep 40
+  fi
 }

@@ -7,17 +7,27 @@ function mod_update() {
   if [ "${LOCK_UPDATES:-false}" == "true" ]; then
     die "Updates are locked due to a failed data migration. Continuing to attempt to update may result in data loss!!! Please contact PlexTrac Support"
   fi
+
+  # if [ "${UPGRADE_STRATEGY}" == "stable" ] && [ -z "${PLEXTRAC_MANAGED:-}" ]; then
+  #   sed -i 's/UPGRADE_STRATEGY=stable/UPGRADE_STRATEGY=2.10/g' .env
+  #   info "Set Upgrade Startegy to 2.10 for stable release cycle. Please do not remove this version pin unless instructed to do so by PlexTrac Support."
+  # else
+  #   info "Cloud hosted customer - no modification of UPGRADE_STRATEGY necessary"
+  # fi
+
   title "Updating PlexTrac"
   # I'm comparing an int :shrug:
   # shellcheck disable=SC2086
   if [ "${AIRGAPPED:-false}" == "false" ]; then
     if [ ${SKIP_SELF_UPGRADE:-0} -eq 0 ]; then
-      info "Checking for updates to the PlexTrac Management Utility"
-      if selfupdate_checkForNewRelease; then
-        event__log_activity "update:upgrade-utility" "${releaseInfo}"
-        selfupdate_doUpgrade
-        die "Failed to upgrade PlexTrac Management Util! Please reach out to support if problem persists"
-        exit 1 # just in case, previous line should already exit
+      if [ ${UTIL_UPDATED:-0} -eq 0 ]; then
+        info "Checking for updates to the PlexTrac Management Utility"
+        if selfupdate_checkForNewRelease; then
+          event__log_activity "update:upgrade-utility" "${releaseInfo}"
+          selfupdate_doUpgrade
+          die "Failed to upgrade PlexTrac Management Util! Please reach out to support if problem persists"
+          exit 1 # just in case, previous line should already exit
+        fi
       fi
     else
       info "Skipping self upgrade"
@@ -47,6 +57,7 @@ function mod_update() {
       for i in ${upgrade_path[@]}
         do
           if [ "$i" != "$running_ver" ]; then
+            info "Starting Update..."
             debug "Upgrading to $i"
             getCKEditorRTCConfig
             mod_configure
@@ -63,8 +74,9 @@ function mod_update() {
               title "Pulling latest container images"
               pull_docker_images
             fi
-              
+
             mod_start || sleep 20
+            run_cb_migrations
             if [ "$CONTAINER_RUNTIME" == "podman" ]; then
               unhealthy_services=$(for service in $(podman ps -a --format json | jq -r .[].Names | grep '"' | cut -d '"' -f2); do podman inspect $service --format json | jq -r '.[] | select(.State.Health.Status == "unhealthy" or (.State.Status != "running" and .State.ExitCode != 0) or .State.Status == "created") | .Name' | xargs -r printf "%s;"; done)
             else
@@ -82,6 +94,7 @@ function mod_update() {
       mod_check_etl_status "${ETL_OUTPUT-}"
       title "Update complete"
   else
+      info "Starting Update..."
       debug "Proceeding with normal update"
       getCKEditorRTCConfig
       mod_configure
@@ -99,14 +112,15 @@ function mod_update() {
         fi
       else
         info "AIRGAPPED mode enabled, skipping image pull"
+        # podman needs to remove containers before attempting to start with updated containers
+        if [ "$CONTAINER_RUNTIME" == "podman" ]; then
+          title "Removing old podman containers"
+          podman_remove
+        fi
       fi
 
-      if [ "$CONTAINER_RUNTIME" == "podman" ]; then
-        title "Pulling latest container images"
-        podman_remove
-        podman_pull_images
-      fi
       mod_start || sleep 20
+      run_cb_migrations
       if [ "$CONTAINER_RUNTIME" == "podman" ]; then
         unhealthy_services=$(for service in $(podman ps -a --format json | jq -r .[].Names | grep '"' | cut -d '"' -f2); do podman inspect $service --format json | jq -r '.[] | select(.State.Health.Status == "unhealthy" or (.State.Status != "running" and .State.ExitCode != 0) or .State.Status == "created") | .Name' | xargs -r printf "%s;"; done)
       else
@@ -207,7 +221,7 @@ function selfupdate_doUpgrade() {
   if [ "${SKIP_APP_UPDATE:-false}" == "true" ]; then
     exit 0
   fi
-  eval "SKIP_SELF_UPGRADE=1 $ProgName $_INITIAL_CMD_ARGS"
+  eval "UTIL_UPDATED=1 $ProgName $_INITIAL_CMD_ARGS"
   exit $?
 }
 

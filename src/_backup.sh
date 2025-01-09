@@ -34,7 +34,7 @@ function backup_fullUploadsBackup() {
     podman exec --workdir="/usr/src/plextrac-api/uploads" plextracapi rm $current_date.tar.gz
     debug "Cleaned Archive from container"
   else
-    debug "`compose_client run --user $(id -u) -v ${uploadsBackupDir}:/backups \
+    debug "`compose_client run --user $(id -u) --no-deps -v ${uploadsBackupDir}:/backups \
       --workdir /usr/src/plextrac-api --rm --entrypoint='' -T  $coreBackendComposeService \
       tar -czf /backups/$(date -u "+%Y-%m-%dT%H%M%Sz").tar.gz uploads`"
   fi
@@ -43,7 +43,7 @@ function backup_fullUploadsBackup() {
 
 function backup_fullCouchbaseBackup() {
   info "$couchbaseComposeService: Performing backup of couchbase database"
-  local user_id=$(id -u plextrac)
+  local user_id=$(id -u ${PLEXTRAC_USER_NAME:-plextrac})
   local cmd="compose_client exec -T"
   if [ "$CONTAINER_RUNTIME" == "podman" ]; then
     cmd='podman exec'
@@ -67,7 +67,7 @@ function backup_fullCouchbaseBackup() {
 
 function backup_fullPostgresBackup() {
   info "$postgresComposeService: Performing backup of postgres database"
-  local user_id=$(id -u plextrac)
+  local user_id=$(id -u ${PLEXTRAC_USER_NAME:-plextrac})
   local cmd="compose_client exec -T --user $user_id"
   if [ "$CONTAINER_RUNTIME" == "podman" ]; then
     cmd='podman exec'
